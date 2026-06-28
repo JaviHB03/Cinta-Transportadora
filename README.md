@@ -1,43 +1,71 @@
-# Cinta-Transportadora
-Proyecto de cinta transportadora con Arduino
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 
 LiquidCrystal_I2C lcd(0x27, 16, 2);
-// MOTOR 
-const int ENA = 9;
-const int IN1 = 5;
-const int IN2 = 6;
 
-//SENSOR ULTRASONICO
-const int trigPin = A1;
-const int echoPin = A0;
+//PINES
+// Motor L298N
+const byte ENA = 9;
+const byte IN1 = 5;
+const byte IN2 = 6;
 
-//BOTONES
-const int botonInicio = 11;
-const int botonReset = 12;
+// Sensor HC-SR04
+const byte trigPin = A1;
+const byte echoPin = A0;
 
-// LEDS
-const int ledVerde = 7;
-const int ledRojo = 4;
+// Botones
+const byte botonInicio = 11;
+const byte botonReset = 12;
 
-//BUZZER 
-const int buzzer = 8;
+// LEDs
+const byte ledVerde = 7;
+const byte ledRojo = 4;
 
-// VARIABLES
-bool motorActivo = false;
-bool objetoDetectado = false;
-bool falla = false;
-bool loteCompleto = false;
+// Buzzer
+const byte buzzer = 8;
+
+// CONFIGURACION
+
+const int VELOCIDAD = 255;
+const int DISTANCIA_DETECCION = 10;
+const int DISTANCIA_LIBERAR = 15;
+const int LIMITE_LOTE = 10;
+
+const unsigned long TIEMPO_FALLA = 5000;
+const unsigned long TIEMPO_BOTON = 250;
+const unsigned long TIEMPO_LCD = 300;
+
+//ESTADOS 
+
+enum EstadoSistema
+{
+  ESPERA,
+  MARCHA,
+  FALLA,
+  LOTE_COMPLETO
+};
+
+EstadoSistema estado = ESPERA;
+
 
 int contador = 0;
-const int LIMITE_LOTE = 10;
+
+bool objetoDetectado = false;
+
+// CONTROL BUZZER
+bool beepActivo = false;
+unsigned long tiempoBeep = 0;
 
 unsigned long ultimoObjeto = 0;
 unsigned long ultimoBoton = 0;
+unsigned long ultimoLCD = 0;
 
-void setup() {
+long distancia = 0;
 
+//SETUP 
+
+void setup()
+{
   pinMode(ENA, OUTPUT);
   pinMode(IN1, OUTPUT);
   pinMode(IN2, OUTPUT);
@@ -56,50 +84,48 @@ void setup() {
   lcd.init();
   lcd.backlight();
 
-  lcd.setCursor(0,0);
+  lcd.clear();
+  lcd.setCursor(0, 0);
   lcd.print("CINTA LISTA");
 
-  lcd.setCursor(0,1);
-  lcd.print("CNT=0");
+  lcd.setCursor(0, 1);
+  lcd.print("CNT:0");
 
   detenerMotor();
 
   ultimoObjeto = millis();
 }
-
-void loop() {
-
-  // ===== BOTON INICIO =====
-  if (digitalRead(botonInicio) == LOW &&
-      millis() - ultimoBoton > 300 &&
-      !falla &&
-      !loteCompleto) {
-
+void loop()
+{
+  //BOTON INICIO 
+  if (digitalRead(botonInicio) == LOW && millis() - ultimoBoton > TIEMPO_BOTON)
+  {
     ultimoBoton = millis();
 
-    motorActivo = !motorActivo;
-
-    if (motorActivo)
+    if (estado == ESPERA)
+    {
+      estado = MARCHA;
       arrancarMotor();
-    else
+      ultimoObjeto = millis();
+    }
+    else if (estado == MARCHA)
+    {
+      estado = ESPERA;
       detenerMotor();
+    }
   }
 
-  //  BOTON RESET 
-  if (digitalRead(botonReset) == LOW &&
-      millis() - ultimoBoton > 300) {
-
+  //BOTON RESET
+  if (digitalRead(botonReset) == LOW && millis() - ultimoBoton > TIEMPO_BOTON)
+  {
     ultimoBoton = millis();
 
     contador = 0;
-
-    falla = false;
-    loteCompleto = false;
     objetoDetectado = false;
-
-    motorActivo = false;
-
+    estado = ESPERA;
     ultimoObjeto = millis();
+
+    detenerMotor();
 
     digitalWrite(ledRojo, LOW);
     digitalWrite(ledVerde, LOW);
@@ -107,122 +133,82 @@ void loop() {
     noTone(buzzer);
 
     lcd.clear();
-    lcd.setCursor(0,0);
+    lcd.setCursor(0, 0);
     lcd.print("SISTEMA RESET");
-    lcd.setCursor(0,1);
-    lcd.print("CNT=0");
+    lcd.setCursor(0, 1);
+    lcd.print("CNT:0");
 
-    delay(1000);
+    delay(500);
+    lcd.clear();
+  }
 
+  //SENSOR 
+  distancia = distanciaFiltrada();
+
+  if (estado == MARCHA)
+  {
+    if (distancia > 0 &&
+        distancia < DISTANCIA_DETECCION &&
+        !objetoDetectado)
+    {
+      contador++;
+      objetoDetectado = true;
+      ultimoObjeto = millis();
+
+      digitalWrite(ledVerde, HIGH);
+
+      // (OBJETO DETECTADO)
+      tone(buzzer, 2000);
+      beepActivo = true;
+      tiempoBeep = millis();
+    }
+
+    if (distancia > DISTANCIA_LIBERAR)
+    {
+      objetoDetectado = false;
+      digitalWrite(ledVerde, LOW);
+    }
+  }
+
+  //FALLA 
+  if (estado == MARCHA)
+  {
+    if (millis() - ultimoObjeto >= TIEMPO_FALLA)
+    {
+      estado = FALLA;
+      detenerMotor();
+    }
+  }
+
+  //=========== LOTE COMPLETO ===========
+  if (contador >= LIMITE_LOTE)
+  {
+    estado = LOTE_COMPLETO;
     detenerMotor();
   }
 
-  long distancia = medirDistancia();
-
-  //DETECCION DE OBJETO
-  if (motorActivo &&
-      !falla &&
-      !loteCompleto &&
-      distancia > 0 &&
-      distancia < 10 &&
-      !objetoDetectado) {
-
-    contador++;
-    objetoDetectado = true;
-
-    ultimoObjeto = millis();
-
-    // Parpadeo LED verde
-    digitalWrite(ledVerde, HIGH);
-    delay(150);
-    digitalWrite(ledVerde, LOW);
-
-    // Beep corto
-    tone(buzzer, 1200, 100);
-
-    lcd.clear();
-    lcd.setCursor(0,0);
-    lcd.print("OBJETO #");
-    lcd.print(contador);
-
-    lcd.setCursor(0,1);
-    lcd.print("CNT=");
-    lcd.print(contador);
+  //LCD
+  if (millis() - ultimoLCD >= TIEMPO_LCD)
+  {
+    ultimoLCD = millis();
+    actualizarLCD();
   }
 
-  // Libera el conteo para el siguiente objeto
-  if (distancia > 15) {
-    objetoDetectado = false;
-  }
+  // ALARMA 
+  actualizarAlarma();
 
-  // FALLA 
-  if (motorActivo &&
-      !falla &&
-      !loteCompleto &&
-      (millis() - ultimoObjeto >= 5000)) {
-
-    falla = true;
-
-    detenerMotor();
-
-    lcd.clear();
-    lcd.setCursor(0,0);
-    lcd.print("FALLA");
-
-    lcd.setCursor(0,1);
-    lcd.print("SIN OBJETO");
-  }
-
-  //LOTE COMPLETO
-  if (contador >= LIMITE_LOTE &&
-      !loteCompleto) {
-
-    loteCompleto = true;
-
-    detenerMotor();
-
-    lcd.clear();
-    lcd.setCursor(0,0);
-    lcd.print("LOTE COMPLETO");
-
-    lcd.setCursor(0,1);
-    lcd.print("TOTAL=10");
-  }
-
-  //ALARMA DE FALLA 
-  if (falla) {
-
-    digitalWrite(ledRojo, HIGH);
-    tone(buzzer, 1500);
-
-    delay(250);
-
-    digitalWrite(ledRojo, LOW);
+  //APAGAR 
+  if (beepActivo && millis() - tiempoBeep >= 80)
+  {
     noTone(buzzer);
-
-    delay(250);
-  }
-
-  // ALARMA LOTE COMPLETO 
-  if (loteCompleto) {
-
-    digitalWrite(ledRojo, HIGH);
-    tone(buzzer, 2000);
-
-    delay(250);
-
-    digitalWrite(ledRojo, LOW);
-    noTone(buzzer);
-
-    delay(250);
+    beepActivo = false;
   }
 }
 
+// FUNCIONES
 
-// SENSOR ULTRASONICO
-
-long medirDistancia() {
-
+long medirDistancia()
+{
   digitalWrite(trigPin, LOW);
   delayMicroseconds(2);
 
@@ -233,47 +219,102 @@ long medirDistancia() {
 
   long duracion = pulseIn(echoPin, HIGH, 30000);
 
-  long distancia = duracion * 0.034 / 2;
+  if (duracion == 0) return 0;
 
-  return distancia;
+  return duracion * 0.0343 / 2;
 }
 
+long distanciaFiltrada()
+{
+  long suma = 0;
+  byte lecturas = 0;
 
-// MOTOR ON
+  for (byte i = 0; i < 3; i++)
+  {
+    long d = medirDistancia();
 
-void arrancarMotor() {
+    if (d > 0)
+    {
+      suma += d;
+      lecturas++;
+    }
 
-  analogWrite(ENA, 255);
+    delay(5);
+  }
 
+  if (lecturas == 0) return 0;
+
+  return suma / lecturas;
+}
+
+void arrancarMotor()
+{
+  analogWrite(ENA, VELOCIDAD);
   digitalWrite(IN1, HIGH);
   digitalWrite(IN2, LOW);
-
-  digitalWrite(ledRojo, LOW);
-
-  lcd.clear();
-  lcd.setCursor(0,0);
-  lcd.print("MOTOR ON");
-
-  lcd.setCursor(0,1);
-  lcd.print("CNT=");
-  lcd.print(contador);
 }
 
-
-// MOTOR OFF
-
-void detenerMotor() {
-
+void detenerMotor()
+{
   analogWrite(ENA, 0);
-
   digitalWrite(IN1, LOW);
   digitalWrite(IN2, LOW);
+}
 
-  digitalWrite(ledVerde, LOW);
+void actualizarLCD()
+{
+  lcd.setCursor(0, 0);
 
-  noTone(buzzer);
+  switch (estado)
+  {
+    case ESPERA: lcd.print("ESPERA         "); break;
+    case MARCHA: lcd.print("MOTOR ON       "); break;
+    case FALLA: lcd.print("FALLA          "); break;
+    case LOTE_COMPLETO: lcd.print("LOTE COMPLETO  "); break;
+  }
 
-  lcd.setCursor(0,1);
-  lcd.print("CNT=");
+  lcd.setCursor(0, 1);
+  lcd.print("C:");
   lcd.print(contador);
+  lcd.print(" D:");
+  lcd.print(distancia);
+  lcd.print("   ");
+}
+
+void actualizarAlarma()
+{
+  static unsigned long ultimoCambio = 0;
+  static bool estadoLed = false;
+
+  if (estado == FALLA)
+  {
+    if (millis() - ultimoCambio >= 250)
+    {
+      ultimoCambio = millis();
+      estadoLed = !estadoLed;
+
+      digitalWrite(ledRojo, estadoLed);
+
+      if (estadoLed) tone(buzzer, 1500);
+      else noTone(buzzer);
+    }
+    return;
+  }
+
+  if (estado == LOTE_COMPLETO)
+  {
+    if (millis() - ultimoCambio >= 200)
+    {
+      ultimoCambio = millis();
+      estadoLed = !estadoLed;
+
+      digitalWrite(ledRojo, estadoLed);
+
+      if (estadoLed) tone(buzzer, 2200);
+      else noTone(buzzer);
+    }
+    return;
+  }
+
+  digitalWrite(ledRojo, LOW);
 }
